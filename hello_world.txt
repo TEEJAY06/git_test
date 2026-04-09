@@ -1,0 +1,140 @@
+Here is a concise context summary you can paste into a new chat:
+
+---
+
+## Mendix Application Context Summary
+
+### Background
+Building a **CY Manager Dashboard** in Mendix that displays a dynamic table of container history records (~6000-10000 records in prod/acceptance). The table columns are dynamic based on SubService types in the system. A custom widget renders a JSON passed from a microflow.
+
+---
+
+### Domain Model
+```
+ContainerHistory
+├── ContainerNumber (String)
+├── CustomerName (String)
+├── GateInStatus (String)
+├── StorageDays (Integer)        ← persisted calculated attribute
+├── InvoicableDays (Integer)     ← persisted calculated attribute
+├── InvoicedDays (Integer)       ← persisted calculated attribute
+├── ... other fixed attributes
+└── RowJSON (String)             ← entire row JSON including subservice columns
+
+SubServiceType
+└── Name (String)                ← drives dynamic columns
+
+Template
+├── TemplateName (String)
+├── IsDefault (Boolean)
+└── [Association to TemplateColumn]
+
+TemplateColumn
+├── ColumnId (String)
+├── IsVisible (Boolean)
+└── IsFilterActive (Boolean)
+
+Table (widget input entity)
+├── Headers → Column
+│   └── columnId, label, isVisible, isFilterable, isMultiselect
+└── Rows → Row → RowItem
+    ├── columnId (String)
+    └── value (String)
+```
+
+---
+
+### JSON Structure Passed to Widget
+```json
+{
+    "headers": ["Container Number", "Customer Name", "Lashing (Normal Cargo)", "Sweeping"...],
+    "rows": [
+        [{"columnId": "Container Number", "value": "SEGU8016379"},
+         {"columnId": "Lashing (Normal Cargo)", "value": "Yes"},
+         ...]
+    ]
+}
+```
+
+---
+
+### Problem
+- Generating JSON for all containers on filter was timing out in prod/acceptance (60s timeout enforced in cloud, not local)
+- Root cause: DB retrievals inside loops + string concatenation in microflow loops
+
+---
+
+### Final Designed Approach
+
+**1. Scheduler (every 3 hours):**
+- Calculate and persist calculated attributes (StorageDays, InvoicableDays etc.) on ContainerHistory
+- Loop over SubServiceTypes and build complete RowJSON per container
+- Store RowJSON as string attribute on ContainerHistory
+
+**2. Page Load — No Filters:**
+- Retrieve stored RowJSON directly from ContainerHistory
+- Pass to widget — no regeneration needed
+
+**3. Page Load — Filters Applied:**
+
+Step 1 — Build dynamic XPath string in microflow:
+```
+Initialize $xpathString = '//Module.ContainerHistory'
+For each static filter: append attribute constraint
+For each SubService filter: append OR condition
+```
+
+Step 2 — Java Action 1 (XPath retrieval):
+```java
+List<IMendixObject> containers = Core.createXPathQuery(xpathString)
+    .execute(context);
+return containers;
+```
+
+Step 3 — Java Action 2 (JSON assembly using StringBuilder):
+```java
+StringBuilder sb = new StringBuilder();
+sb.append("{\"headers\":[...]\"rows\":[");
+for (IMendixObject container : containerList) {
+    sb.append(container.getValue(context, "RowJSON"));
+    sb.append(",");
+}
+// trim trailing comma
+sb.append("]}");
+return sb.toString();
+```
+
+Step 4 — Pass final JSON string to widget
+
+**4. Template — Column Show/Hide:**
+- RowJSON always contains ALL columns
+- Widget receives full RowJSON + template column visibility settings
+- Widget handles show/hide on frontend — no JSON regeneration needed
+
+---
+
+### Key Technical Decisions
+
+| Decision | Reason |
+|---|---|
+| XPath via Java action for filtering | Mendix built-in retrieve doesn't accept dynamic XPath string |
+| OR conditions for SubService filter | User selects multiple subservices, any match should return container |
+| StringBuilder in Java action for JSON assembly | Mendix string concatenation in microflow loop is slow due to Java string immutability — community benchmark: 334s for 50k records vs 2.75s with StringBuilder |
+| Persist calculated attributes | XPath cannot filter on calculated attributes — must be in DB |
+| Store RowJSON on ContainerHistory | Avoid regenerating JSON on every filter apply |
+| Widget handles column show/hide | Display concern, not data concern — no regeneration needed |
+
+---
+
+### Pending Implementation Steps
+1. Add persisted calculated attributes to ContainerHistory entity
+2. Add RowJSON attribute to ContainerHistory entity
+3. Update scheduler to persist calculated attributes and RowJSON
+4. Create Java action for dynamic XPath retrieval
+5. Create Java action for StringBuilder JSON assembly
+6. Update filter microflow to use both Java actions
+7. Update widget to handle column visibility from template
+
+---
+
+Save this and paste it at the start of your next chat. Good luck with the implementation! 🚀
